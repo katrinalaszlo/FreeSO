@@ -57,6 +57,7 @@ namespace FSO_BrowserClient
         bool houseApplied;
         JoinStage? lastLoggedJoinStage;
         FurnitureLayer furniture;
+        readonly VitaboyLayer vitaboy = new VitaboyLayer();
         bool furnitureFetchStarted;
         PackObjectLoader packs;
         bool packsFetchStarted;
@@ -81,6 +82,7 @@ namespace FSO_BrowserClient
         bool vmArchApplied;
         int vmArchWaitFrames;
         bool vmLeftWasDown;
+        bool followSim = true;
         /// <summary>Fired when a click lands a real TTAB pie menu:
         /// (calleeObjectID, [(optionID, name)], screenX, screenY). Index renders
         /// it as a DOM overlay.</summary>
@@ -89,6 +91,16 @@ namespace FSO_BrowserClient
         public event Action<string> OnChatLine;
         /// <summary>Fired once when the VM client starts (shows the chat overlay).</summary>
         public event Action OnVmStarted;
+        /// <summary>Human-readable boot/status text for the DOM overlay; "" hides it.</summary>
+        public event Action<string> OnStatusText;
+        string lastPushedStatus;
+
+        void PushStatus(string text)
+        {
+            if (text == lastPushedStatus) return;
+            lastPushedStatus = text;
+            OnStatusText?.Invoke(text);
+        }
 
         /// <summary>DOM chat box submitted a message.</summary>
         public void SendChatFromUi(string message)
@@ -557,11 +569,13 @@ namespace FSO_BrowserClient
                 {
                     vmContentStarted = true;
                     var tarUrl = new Uri(new Uri(_wwwrootBase), "tso-content/content.tar.gz").AbsoluteUri;
-                    _ = BrowserContentBoot.RunAsync(tarUrl);
+                    _ = BrowserContentBoot.RunAsync(tarUrl, VitaboyLayer.Enabled ? GraphicsDevice : null);
                 }
                 loadStatus = BrowserContentBoot.Ready
                     ? (vmClient?.Status ?? "vm starting")
                     : BrowserContentBoot.Status;
+                // Readable progress until the lot is on screen, then hide.
+                PushStatus(vmArchApplied ? "" : loadStatus);
 
                 if (BrowserContentBoot.Ready && !vmStarted)
                 {
@@ -575,6 +589,15 @@ namespace FSO_BrowserClient
                 }
 
                 vmClient?.Update(gameTime.ElapsedGameTime.TotalSeconds);
+
+                // Keep your own sim on screen. It joins at the lot edge, far from
+                // the house, and a capsule at the frame edge (or just outside it)
+                // reads as "there is no sim". Any manual pan hands control back.
+                if (followSim && DrawRealLot && vmClient != null)
+                {
+                    var tile = vmClient.MyTile();
+                    if (tile.HasValue) realWorld.State.CenterTile = tile.Value;
+                }
 
                 // Clicks arrive from JS via OnCanvasClick — KNI's Mouse.GetState
                 // misses synthetic (and some real) clicks under BlazorGL.
@@ -697,6 +720,11 @@ namespace FSO_BrowserClient
                     // Pan CenterTile (tile units) for real LotView camera.
                     const float tilePan = 8f;
                     var ct = realWorld.State.CenterTile;
+                    if (keyboardState.IsKeyDown(Keys.Left) || keyboardState.IsKeyDown(Keys.A)
+                        || keyboardState.IsKeyDown(Keys.Right) || keyboardState.IsKeyDown(Keys.D)
+                        || keyboardState.IsKeyDown(Keys.Up) || keyboardState.IsKeyDown(Keys.W)
+                        || keyboardState.IsKeyDown(Keys.Down) || keyboardState.IsKeyDown(Keys.S))
+                        followSim = false; // manual pan wins
                     if (keyboardState.IsKeyDown(Keys.Left) || keyboardState.IsKeyDown(Keys.A))
                         ct.X -= tilePan * dt;
                     if (keyboardState.IsKeyDown(Keys.Right) || keyboardState.IsKeyDown(Keys.D))
@@ -803,6 +831,54 @@ namespace FSO_BrowserClient
             return "[" + string.Join(",", items) + "]";
         }
 
+        /// <summary>Test hook: what object is actually at this tile? An empty pie
+        /// menu means "nothing to do here" *or* "nothing is here" — telling those
+        /// apart decides whether furniture needs behaviour or just moving.</summary>
+        public string DebugObjectAt(float tileX, float tileY)
+        {
+            if (vmClient == null || !vmClient.Synced) return "{\"found\":false}";
+            var (target, pie) = vmClient.PieMenuAt(new Vector2(tileX, tileY));
+            if (target == null) return "{\"found\":false}";
+            // Report the group's GUID, not the part's. A multitile object is placed
+            // by its master GUID but clicked on one of its parts, so a caller
+            // checking "did I hit the bed I placed" needs the master to compare
+            // against — GroupDefinition is the master OBJD for a part and the
+            // object's own for anything single-tile.
+            var guid = target.GroupDefinition?.GUID ?? target.Object?.OBJ?.GUID ?? 0;
+            var name = (target.Object?.OBJ?.ChunkLabel ?? target.ToString() ?? "").Replace("\"", "'");
+            // Runtime Flags, not OBJD data: DisallowPersonIntersection/AllowPersonIntersection
+            // are usually set by the object's own init BHAV at creation, not baked into the
+            // chunk, so this is the only place to actually see whether a sim can route onto
+            // this object's own tile (see WorldUI.AvatarSolid in VMEntity.SetValue).
+            var flags = (FSO.SimAntics.VMEntityFlags)target.GetValue(FSO.SimAntics.Model.VMStackObjectVariable.Flags);
+            var allowPI = flags.HasFlag(FSO.SimAntics.VMEntityFlags.AllowPersonIntersection);
+            var disallowPI = flags.HasFlag(FSO.SimAntics.VMEntityFlags.DisallowPersonIntersection);
+            return $"{{\"found\":true,\"guid\":\"0x{guid:X8}\",\"name\":\"{name}\"" +
+                   $",\"objectID\":{target.ObjectID},\"tileX\":{target.Position.TileX},\"tileY\":{target.Position.TileY}" +
+                   $",\"options\":{(pie?.Count ?? 0)}" +
+                   $",\"flags\":\"0x{(int)flags:X4}\",\"allowPersonIntersection\":{allowPI.ToString().ToLower()}" +
+                   $",\"disallowPersonIntersection\":{disallowPI.ToString().ToLower()}}}";
+        }
+
+        /// <summary>Test hook: where is my sim, and is it drawable? Visual QA
+        /// needs the truth about the avatar, not an inference from pixels.</summary>
+        public string DebugMe()
+        {
+            var ava = vmClient?.MyAvatar;
+            if (ava == null) return "{\"found\":false}";
+            var pos = ava.Position;
+            var queue = string.Join(";", ava.Thread?.Queue?.Select(q => q.Name ?? "?") ?? new string[0]);
+            var screen = realWorld == null ? Vector2.Zero
+                : realWorld.State.WorldSpace.GetScreenFromTile(new Vector2(pos.x / 16f, pos.y / 16f))
+                  + realWorld.State.WorldSpace.GetPointScreenOffset();
+            return "{\"found\":true"
+                + $",\"tileX\":{pos.x / 16f:F1},\"tileY\":{pos.y / 16f:F1},\"level\":{pos.Level}"
+                + $",\"outOfWorld\":{(pos == FSO.LotView.Model.LotTilePos.OUT_OF_WORLD).ToString().ToLower()}"
+                + $",\"hidden\":{ava.GetValue(FSO.SimAntics.Model.VMStackObjectVariable.Hidden)}"
+                + $",\"screenX\":{(int)screen.X},\"screenY\":{(int)screen.Y}"
+                + $",\"queue\":\"{queue}\"}}";
+        }
+
         /// <summary>Test hook: screen position of a tile centre (for real click tests).</summary>
         public string DebugScreenPos(float tileX, float tileY)
         {
@@ -838,7 +914,16 @@ namespace FSO_BrowserClient
 
                 spriteBatch.Begin();
                 if (DrawRealLot && furniture != null) furniture.Draw(spriteBatch, realWorld.State);
-                if (DrawRealLot && vmClient != null) vmClient.DrawEntities(spriteBatch, realWorld.State);
+                // Real Sims bodies interleave into this same per-tile depth order
+                // now (see DrawEntities' doc comment) — a sim on a tile "behind" a
+                // table draws behind it, not on top of it. DrawEntities flushes and
+                // reopens the batch around each body draw as needed.
+                if (DrawRealLot && vmClient != null)
+                    vmClient.DrawEntities(GraphicsDevice, spriteBatch, realWorld.State,
+                        VitaboyLayer.Enabled ? vitaboy : null);
+                spriteBatch.End();
+
+                spriteBatch.Begin();
                 DrawLotStatusStrip();
                 spriteBatch.End();
             }

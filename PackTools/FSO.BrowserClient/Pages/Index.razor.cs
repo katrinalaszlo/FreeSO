@@ -37,9 +37,21 @@ namespace FSO_BrowserClient.Pages
         }
 
         [JSInvokable]
+        public string DebugObjectAt(float tileX, float tileY)
+        {
+            return (_game as FSO_BrowserClientGame)?.DebugObjectAt(tileX, tileY) ?? "{}";
+        }
+
+        [JSInvokable]
         public string DebugScreenPos(float tileX, float tileY)
         {
             return (_game as FSO_BrowserClientGame)?.DebugScreenPos(tileX, tileY) ?? "{}";
+        }
+
+        [JSInvokable]
+        public string DebugMe()
+        {
+            return (_game as FSO_BrowserClientGame)?.DebugMe() ?? "{}";
         }
 
         [JSInvokable]
@@ -116,6 +128,15 @@ namespace FSO_BrowserClient.Pages
                 // SimAntics VM in lockstep with LotHostLite. ?name= labels the avatar.
                 var vmMode = QueryValue(uri, "vm") == "1";
                 var vmName = QueryValue(uri, "name");
+                // Real skinned Sims by default; ?vitaboy=0 opts back to capsules
+                // (the known-good fallback where real bodies don't render). Also
+                // gates whether the content boot passes a GraphicsDevice, which is
+                // what turns on the avatar mesh/texture providers. Cleared to be the
+                // default by mixed_mode_vm.js: a ?vitaboy=1 tab and a plain tab ran
+                // 60s+ of shared lockstep VM and agreed on every synctick hash, so
+                // the GraphicsDevice this flag threads into Content.Init is not a
+                // desync risk.
+                VitaboyLayer.Enabled = QueryValue(uri, "vitaboy") != "0";
 
                 _game = new FSO_BrowserClientGame(contentBase, gateway, autoJoin, forceLot, probeXnb, forceRealLot, houseUrl,
                     furnishReal, zoomParam, rot, vmMode, vmName, Navigation.BaseUri);
@@ -130,6 +151,11 @@ namespace FSO_BrowserClient.Pages
                     ((IJSInProcessRuntime)JsRuntime).InvokeVoid("fsoChat.init");
                 game.OnChatLine += (line) =>
                     ((IJSInProcessRuntime)JsRuntime).InvokeVoid("fsoChat.push", line);
+                game.OnStatusText += (text) =>
+                    ((IJSInProcessRuntime)JsRuntime).InvokeVoid("fsoStatus.set", text ?? "");
+                if (!vmMode)
+                    ((IJSInProcessRuntime)JsRuntime).InvokeVoid("fsoStatus.set",
+                        "Not in game mode — open " + Navigation.BaseUri + "?vm=1&name=you to join the shared lot.");
                 _game.Run();
             }
 

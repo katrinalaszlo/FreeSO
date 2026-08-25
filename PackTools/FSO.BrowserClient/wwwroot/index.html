@@ -130,6 +130,39 @@
             hide() { if (this.el) { this.el.remove(); this.el = null; } },
         };
 
+        // Build tag, bottom-right: run_browser_demo.sh substitutes the git rev
+        // at publish time, so a stale served build is visible at a glance.
+        // (Unsubstituted placeholder = not published through the demo script.)
+        window.addEventListener('DOMContentLoaded', () => {
+            var tag = document.createElement('div');
+            tag.id = 'fsoBuildTag';
+            tag.textContent = 'build __FSO_BUILD_REV__';
+            tag.style.cssText = 'position:fixed;right:8px;bottom:6px;z-index:1100;' +
+                'font:12px monospace;color:#8a94c8;background:rgba(24,28,48,0.8);' +
+                'padding:2px 6px;border-radius:4px;pointer-events:none;';
+            document.body.appendChild(tag);
+        });
+
+        // Boot status overlay: readable text for what the tab is doing (the
+        // canvas status panel only draws placeholder bars — no font). Driven
+        // from .NET each time the status changes; empty text hides it.
+        window.fsoStatus = {
+            el: null,
+            set(text) {
+                if (!text) { if (this.el) { this.el.remove(); this.el = null; } return; }
+                if (!this.el) {
+                    var el = document.createElement('div');
+                    el.id = 'fsoStatus';
+                    el.style.cssText = 'position:fixed;top:12px;left:50%;transform:translateX(-50%);' +
+                        'z-index:1100;background:rgba(24,28,48,0.92);border:1px solid #4f6ef7;border-radius:8px;' +
+                        'padding:8px 16px;font:14px sans-serif;color:#cdd6ff;max-width:80%;text-align:center;';
+                    document.body.appendChild(el);
+                    this.el = el;
+                }
+                this.el.textContent = text;
+            },
+        };
+
         // Chat overlay (?vm=1): log + input, bottom-left. Lines come from the
         // shared VM's chat events; Enter sends a VMNetChatCmd.
         window.fsoChat = {
@@ -174,6 +207,8 @@
         window.fsoDebug = {
             pie: (tx, ty) => window.theInstance.invokeMethod('DebugPie', tx, ty),
             screenPos: (tx, ty) => window.theInstance.invokeMethod('DebugScreenPos', tx, ty),
+            me: () => window.theInstance.invokeMethod('DebugMe'),
+            objectAt: (tx, ty) => window.theInstance.invokeMethod('DebugObjectAt', tx, ty),
             interact: (callee, id) => window.theInstance.invokeMethod('PieSelect', callee, id),
         };
 
